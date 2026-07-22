@@ -92,17 +92,30 @@ impl UPKFile {
         // Read name table
         cursor.seek(std::io::SeekFrom::Start(header.name_offset as u64))?;
         let mut names = Vec::with_capacity(header.name_count as usize);
-        for _ in 0..header.name_count {
-            let name_length = cursor.read_i32::<LittleEndian>()?;
-            if name_length > 0 && name_length < 1024 {
-                let mut name_bytes = vec![0u8; name_length as usize];
-                cursor.read_exact(&mut name_bytes)?;
-                // Remove null terminator if present
-                if name_bytes.last() == Some(&0) {
-                    name_bytes.pop();
+        for i in 0..header.name_count {
+            match cursor.read_i32::<LittleEndian>() {
+                Ok(name_length) => {
+                    if name_length > 0 && name_length < 1024 {
+                        let mut name_bytes = vec![0u8; name_length as usize];
+                        if cursor.read_exact(&mut name_bytes).is_ok() {
+                            // Remove null terminator if present
+                            if name_bytes.last() == Some(&0) {
+                                name_bytes.pop();
+                            }
+                            let name = String::from_utf8_lossy(&name_bytes).to_string();
+                            names.push(name);
+                        } else {
+                            log::warn!("Failed to read name {} data", i);
+                            names.push(format!("Unknown_{}", i));
+                        }
+                    } else {
+                        names.push(format!("Invalid_{}", i));
+                    }
                 }
-                let name = String::from_utf8_lossy(&name_bytes).to_string();
-                names.push(name);
+                Err(e) => {
+                    log::warn!("Failed to read name {} length: {}", i, e);
+                    names.push(format!("Error_{}", i));
+                }
             }
         }
 
@@ -112,7 +125,10 @@ impl UPKFile {
         for _ in 0..header.import_count {
             match ImportEntry::read(&mut cursor) {
                 Ok(entry) => imports.push(entry),
-                Err(e) => log::warn!("Failed to read import entry: {}", e),
+                Err(e) => {
+                    log::warn!("Failed to read import entry: {}", e);
+                    break; // Stop reading imports on error
+                }
             }
         }
 
@@ -122,7 +138,10 @@ impl UPKFile {
         for _ in 0..header.export_count {
             match ExportEntry::read(&mut cursor) {
                 Ok(entry) => exports.push(entry),
-                Err(e) => log::warn!("Failed to read export entry: {}", e),
+                Err(e) => {
+                    log::warn!("Failed to read export entry: {}", e);
+                    break; // Stop reading exports on error
+                }
             }
         }
 
