@@ -1,7 +1,7 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use log::{debug, info, warn};
 use std::path::{Path, PathBuf};
-use walker::Walker;
+use walkdir::WalkDir;
 
 use crate::asset_types::{AssetType, ue3_classes};
 use crate::upk::UPKFile;
@@ -22,15 +22,10 @@ impl AssetExtractor {
         let mut upk_count = 0;
         let mut total_assets = 0;
 
-        for entry in Walker::new(input_dir) {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("Error reading directory entry: {}", e);
-                    continue;
-                }
-            };
-
+        for entry in WalkDir::new(input_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("upk") {
                 upk_count += 1;

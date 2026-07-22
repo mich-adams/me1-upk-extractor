@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use log::{error, info};
+use log::info;
 use std::path::PathBuf;
 
 mod upk;
