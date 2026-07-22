@@ -6,14 +6,18 @@ use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::Path;
 
-/// UPK file header
+/// UPK file header - complete UE3 structure
 #[binrw]
 #[brw(little)]
 #[derive(Debug, Clone)]
 pub struct UPKHeader {
     pub signature: u32, // Should be 0x9E2A83C1
-    pub version: u16,
-    pub license_mode: u16,
+    pub legacy_version: i32,
+    pub file_version: i32,
+    pub licensee_version: i32,
+    pub header_size: i32,
+    pub folder_name_length: i32, // Unicode string length (usually 0 or 1)
+    // Folder name would follow if length > 0, but we skip for now
     pub package_flags: u32,
     pub name_count: u32,
     pub name_offset: u32,
@@ -21,6 +25,14 @@ pub struct UPKHeader {
     pub export_offset: u32,
     pub import_count: u32,
     pub import_offset: u32,
+    // GUID (16 bytes)
+    pub guid_a: u32,
+    pub guid_b: u32,
+    pub guid_c: u32,
+    pub guid_d: u32,
+    // Generations
+    pub generation_count: i32,
+    // We'll skip the generation array and additional fields for now
 }
 
 impl UPKHeader {
@@ -79,80 +91,102 @@ impl UPKFile {
 
         let mut cursor = Cursor::new(&bytes);
 
-        // Read header
-        let header = UPKHeader::read(&mut cursor)?;
-
-        if header.signature != UPKHeader::SIGNATURE {
+        // Read header signature and initial fields to check validity
+        let signature = cursor.read_u32::<LittleEndian>()?;
+        if signature != UPKHeader::SIGNATURE {
             return Err(anyhow!(
                 "Invalid UPK signature: {:#x}",
-                header.signature
+                signature
             ));
         }
 
+        // Reset and read full header using binrw
+        cursor.set_position(0);
+        let header = match UPKHeader::read(&mut cursor) {
+            Ok(h) => h,
+            Err(e) => {
+                log::warn!("Failed to parse header: {}, trying minimal parse", e);
+                // Return error if header parsing fails
+                return Err(anyhow!("Failed to parse UPK header: {}", e));
+            }
+        };
+
+        log::debug!(
+            "UPK Header: version={}, flags={:#x}, names={}, exports={}, imports={}",
+            header.file_version,
+            header.package_flags,
+            header.name_count,
+            header.export_count,
+            header.import_count
+        );
+
         // Read name table
-        cursor.seek(std::io::SeekFrom::Start(header.name_offset as u64))?;
-        let mut names = Vec::with_capacity(header.name_count as usize);
-        for i in 0..header.name_count {
-            match cursor.read_i32::<LittleEndian>() {
-                Ok(name_length) => {
-                    if name_length > 0 && name_length < 1024 {
-                        let mut name_bytes = vec![0u8; name_length as usize];
-                        if cursor.read_exact(&mut name_bytes).is_ok() {
-                            // Remove null terminator if present
-                            if name_bytes.last() == Some(&0) {
-                                name_bytes.pop();
+        if header.name_offset > 0 && header.name_count > 0 {
+            cursor.seek(std::io::SeekFrom::Start(header.name_offset as u64))?;
+            let mut names = Vec::with_capacity(header.name_count as usize);
+            for i in 0..header.name_count {
+                match cursor.read_i32::<LittleEndian>() {
+                    Ok(name_length) => {
+                        if name_length > 0 && name_length < 1024 {
+                            let mut name_bytes = vec![0u8; name_length as usize];
+                            if cursor.read_exact(&mut name_bytes).is_ok() {
+                                // Remove null terminator if present
+                                if name_bytes.last() == Some(&0) {
+                                    name_bytes.pop();
+                                }
+                                let name = String::from_utf8_lossy(&name_bytes).to_string();
+                                names.push(name);
+                            } else {
+                                log::debug!("Failed to read name {} data", i);
+                                names.push(format!("Unknown_{}", i));
                             }
-                            let name = String::from_utf8_lossy(&name_bytes).to_string();
-                            names.push(name);
                         } else {
-                            log::warn!("Failed to read name {} data", i);
-                            names.push(format!("Unknown_{}", i));
+                            names.push(format!("Invalid_{}", i));
                         }
-                    } else {
-                        names.push(format!("Invalid_{}", i));
+                    }
+                    Err(e) => {
+                        log::debug!("Failed to read name {} length: {}", i, e);
+                        names.push(format!("Error_{}", i));
                     }
                 }
-                Err(e) => {
-                    log::warn!("Failed to read name {} length: {}", i, e);
-                    names.push(format!("Error_{}", i));
+            }
+            // Read import table
+            cursor.seek(std::io::SeekFrom::Start(header.import_offset as u64))?;
+            let mut imports = Vec::with_capacity(header.import_count as usize);
+            for _ in 0..header.import_count {
+                match ImportEntry::read(&mut cursor) {
+                    Ok(entry) => imports.push(entry),
+                    Err(e) => {
+                        log::debug!("Failed to read import entry: {}", e);
+                        break;
+                    }
                 }
             }
-        }
 
-        // Read import table
-        cursor.seek(std::io::SeekFrom::Start(header.import_offset as u64))?;
-        let mut imports = Vec::with_capacity(header.import_count as usize);
-        for _ in 0..header.import_count {
-            match ImportEntry::read(&mut cursor) {
-                Ok(entry) => imports.push(entry),
-                Err(e) => {
-                    log::warn!("Failed to read import entry: {}", e);
-                    break; // Stop reading imports on error
+            // Read export table
+            cursor.seek(std::io::SeekFrom::Start(header.export_offset as u64))?;
+            let mut exports = Vec::with_capacity(header.export_count as usize);
+            for _ in 0..header.export_count {
+                match ExportEntry::read(&mut cursor) {
+                    Ok(entry) => exports.push(entry),
+                    Err(e) => {
+                        log::debug!("Failed to read export entry: {}", e);
+                        break;
+                    }
                 }
             }
-        }
 
-        // Read export table
-        cursor.seek(std::io::SeekFrom::Start(header.export_offset as u64))?;
-        let mut exports = Vec::with_capacity(header.export_count as usize);
-        for _ in 0..header.export_count {
-            match ExportEntry::read(&mut cursor) {
-                Ok(entry) => exports.push(entry),
-                Err(e) => {
-                    log::warn!("Failed to read export entry: {}", e);
-                    break; // Stop reading exports on error
-                }
-            }
+            Ok(UPKFile {
+                path,
+                header,
+                names,
+                exports,
+                imports,
+                file_data: bytes,
+            })
+        } else {
+            Err(anyhow!("Invalid UPK: no name table or exports"))
         }
-
-        Ok(UPKFile {
-            path,
-            header,
-            names,
-            exports,
-            imports,
-            file_data: bytes,
-        })
     }
 
     /// Get the name of an object by index
