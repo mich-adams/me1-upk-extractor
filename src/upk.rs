@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Result};
 use binrw::{binrw, BinRead};
+use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::Bytes;
 use std::fs::File;
-use std::io::{Read, ReadExt, Seek};
+use std::io::{Read, Seek};
 use std::path::Path;
 
 /// UPK file header
@@ -92,7 +93,7 @@ impl UPKFile {
         cursor.seek(std::io::SeekFrom::Start(header.name_offset as u64))?;
         let mut names = Vec::with_capacity(header.name_count as usize);
         for _ in 0..header.name_count {
-            let name_length = cursor.read_i32::<std::io::LittleEndian>()?;
+            let name_length = cursor.read_i32::<LittleEndian>()?;
             if name_length > 0 && name_length < 1024 {
                 let mut name_bytes = vec![0u8; name_length as usize];
                 cursor.read_exact(&mut name_bytes)?;
